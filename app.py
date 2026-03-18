@@ -1,22 +1,77 @@
-"""Sprout Social MCP — HTTP Transport for Railway\n\nWraps the sprout-mcp STDIO server as an HTTP JSON-RPC 2.0 endpoint\nso Cowork plugins can reach it over the network.\n"""
+"""Sprout Social MCP — FastMCP Streamable HTTP Server
+====================================================
+Exposes Sprout Social API as MCP tools via Streamable HTTP transport.
+Deployed on Railway, consumed by KGS plugin in Cowork.
+
+Tools:
+1.  list_customers         — List accessible accounts
+2.  list_profiles           — List social profiles
+3.  list_tags               — List message tags
+4.  list_groups             — List profile groups
+5.  list_users              — List active users
+6.  list_teams              — List teams
+7.  get_profile_analytics   — Profile-level metrics
+8.  get_post_analytics      — Post-level metrics
+9.  list_listening_topics   — Listening topics
+10. get_listening_messages  — Listening topic messages
+11. get_messages            — Smart Inbox messages
+12. list_publishing_posts   — Published/scheduled/draft posts
+13. create_post             — Create draft or scheduled post
+14. get_publishing_post     — Get single post by ID
+
+Run:
+  uvicorn app:app --host 0.0.0.0 --port $PORT
+"""
 
 import json
 import logging
 import os
-from functools import wraps
+from typing import Optional
 
-from flask import Flask, request, jsonify
 import httpx
+from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
-app = Flask(__name__)
-logger = logging.getLogger(__name__)
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Sprout Social API Client
+# Transport security: allow Railway hostname
 # ---------------------------------------------------------------------------
+_railway_host = os.environ.get(
+    "RAILWAY_PUBLIC_DOMAIN",
+    "sprout-mcp-production.up.railway.app",
+)
 
+_transport_security = TransportSecuritySettings(
+    allowed_hosts=[
+        _railway_host,
+        "localhost",
+        "127.0.0.1",
+    ],
+    enable_dns_rebinding_protection=True,
+)
+
+# ---------------------------------------------------------------------------
+# FastMCP Server
+# ---------------------------------------------------------------------------
+mcp = FastMCP(
+    "sprout-social",
+    instructions=(
+        "Sprout Social MCP provides social media analytics, publishing, "
+        "listening, and inbox management for Kenetik's 5 social profiles."
+    ),
+    transport_security=_transport_security,
+)
+
+# ---------------------------------------------------------------------------
+# Sprout Social API helpers
+# ---------------------------------------------------------------------------
 BASE_URL = "https://api.sproutsocial.com"
+
 
 def _headers():
     token = os.environ.get("SPROUT_API_TOKEN", "")
@@ -26,549 +81,431 @@ def _headers():
         "Accept": "application/json",
     }
 
+
 def _cid(customer_id=""):
     return customer_id or os.environ.get("SPROUT_CUSTOMER_ID", "")
 
+
 def _split(s):
     return [x.strip() for x in s.split(",") if x.strip()]
+
 
 def _date(dt):
     return dt[:10]
 
 
 # ---------------------------------------------------------------------------
-# MCP Tool Registry
+# Tool 1: list_customers
 # ---------------------------------------------------------------------------
-
-MCP_TOOLS = {}
-
-def mcp_tool(name, description, input_schema):
-    def decorator(func):
-        MCP_TOOLS[name] = {
-            "name": name,
-            "description": description,
-            "inputSchema": input_schema,
-            "handler": func,
-        }
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            return func(*args, **kwargs)
-        return wrapper
-    return decorator
-
-
-# ---------------------------------------------------------------------------
-# Auth
-# ---------------------------------------------------------------------------
-
-def verify_auth():
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        return False
-    token = auth_header[7:]
-    expected = os.environ.get("MCP_API_KEY", "")
-    if not expected:
-        return True  # No key set = dev mode
-    return token == expected
-
-
-# ---------------------------------------------------------------------------
-# Tool Implementations
-# ---------------------------------------------------------------------------
-
-@mcp_tool(
-    name="list_customers",
-    description="List all customers/accounts accessible with the current API token. Returns customer IDs and names needed for other API calls.",
-    input_schema={"type": "object", "properties": {}},
-)
-def handle_list_customers(params):
+@mcp.tool()
+def list_customers() -> str:
+    """List all customers/accounts accessible with the current API token.
+    Returns customer IDs and names needed for other API calls."""
     try:
         r = httpx.get(f"{BASE_URL}/v1/metadata/client", headers=_headers(), timeout=30)
         r.raise_for_status()
-        return {"result": json.dumps(r.json(), indent=2)}
+        return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return {"error": str(e), "status": "failed"}
+        return json.dumps({"error": str(e), "status": "failed"})
 
 
-@mcp_tool(
-    name="list_profiles",
-    description="List all social profiles for a customer.",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "customer_id": {"type": "string", "default": "", "description": "Sprout customer ID. Defaults to SPROUT_CUSTOMER_ID env var."},
-        },
-    },
-)
-def handle_list_profiles(params):
+# ---------------------------------------------------------------------------
+# Tool 2: list_profiles
+# ---------------------------------------------------------------------------
+@mcp.tool()
+def list_profiles(customer_id: str = "") -> str:
+    """List all social profiles for a customer.
+
+    Args:
+        customer_id: Sprout customer ID. Defaults to SPROUT_CUSTOMER_ID env var.
+    """
     try:
-        cid = _cid(params.get("customer_id", ""))
+        cid = _cid(customer_id)
         r = httpx.get(f"{BASE_URL}/v1/{cid}/metadata/customer", headers=_headers(), timeout=30)
         r.raise_for_status()
-        return {"result": json.dumps(r.json(), indent=2)}
+        return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return {"error": str(e), "status": "failed"}
+        return json.dumps({"error": str(e), "status": "failed"})
 
 
-@mcp_tool(
-    name="list_tags",
-    description="List all message tags for a customer.",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "customer_id": {"type": "string", "default": "", "description": "Sprout customer ID. Defaults to SPROUT_CUSTOMER_ID env var."},
-        },
-    },
-)
-def handle_list_tags(params):
+# ---------------------------------------------------------------------------
+# Tool 3: list_tags
+# ---------------------------------------------------------------------------
+@mcp.tool()
+def list_tags(customer_id: str = "") -> str:
+    """List all message tags for a customer.
+
+    Args:
+        customer_id: Sprout customer ID. Defaults to SPROUT_CUSTOMER_ID env var.
+    """
     try:
-        cid = _cid(params.get("customer_id", ""))
+        cid = _cid(customer_id)
         r = httpx.get(f"{BASE_URL}/v1/{cid}/metadata/customer/tags", headers=_headers(), timeout=30)
         r.raise_for_status()
-        return {"result": json.dumps(r.json(), indent=2)}
+        return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return {"error": str(e), "status": "failed"}
+        return json.dumps({"error": str(e), "status": "failed"})
 
 
-@mcp_tool(
-    name="list_groups",
-    description="List all profile groups for a customer.",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "customer_id": {"type": "string", "default": "", "description": "Sprout customer ID. Defaults to SPROUT_CUSTOMER_ID env var."},
-        },
-    },
-)
-def handle_list_groups(params):
+# ---------------------------------------------------------------------------
+# Tool 4: list_groups
+# ---------------------------------------------------------------------------
+@mcp.tool()
+def list_groups(customer_id: str = "") -> str:
+    """List all profile groups for a customer.
+
+    Args:
+        customer_id: Sprout customer ID. Defaults to SPROUT_CUSTOMER_ID env var.
+    """
     try:
-        cid = _cid(params.get("customer_id", ""))
+        cid = _cid(customer_id)
         r = httpx.get(f"{BASE_URL}/v1/{cid}/metadata/customer/groups", headers=_headers(), timeout=30)
         r.raise_for_status()
-        return {"result": json.dumps(r.json(), indent=2)}
+        return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return {"error": str(e), "status": "failed"}
+        return json.dumps({"error": str(e), "status": "failed"})
 
 
-@mcp_tool(
-    name="list_users",
-    description="List all active users for a customer.",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "customer_id": {"type": "string", "default": "", "description": "Sprout customer ID. Defaults to SPROUT_CUSTOMER_ID env var."},
-        },
-    },
-)
-def handle_list_users(params):
+# ---------------------------------------------------------------------------
+# Tool 5: list_users
+# ---------------------------------------------------------------------------
+@mcp.tool()
+def list_users(customer_id: str = "") -> str:
+    """List all active users for a customer.
+
+    Args:
+        customer_id: Sprout customer ID. Defaults to SPROUT_CUSTOMER_ID env var.
+    """
     try:
-        cid = _cid(params.get("customer_id", ""))
+        cid = _cid(customer_id)
         r = httpx.get(f"{BASE_URL}/v1/{cid}/metadata/customer/users", headers=_headers(), timeout=30)
         r.raise_for_status()
-        return {"result": json.dumps(r.json(), indent=2)}
+        return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return {"error": str(e), "status": "failed"}
+        return json.dumps({"error": str(e), "status": "failed"})
 
 
-@mcp_tool(
-    name="list_teams",
-    description="List all teams for a customer.",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "customer_id": {"type": "string", "default": "", "description": "Sprout customer ID. Defaults to SPROUT_CUSTOMER_ID env var."},
-        },
-    },
-)
-def handle_list_teams(params):
+# ---------------------------------------------------------------------------
+# Tool 6: list_teams
+# ---------------------------------------------------------------------------
+@mcp.tool()
+def list_teams(customer_id: str = "") -> str:
+    """List all teams for a customer.
+
+    Args:
+        customer_id: Sprout customer ID. Defaults to SPROUT_CUSTOMER_ID env var.
+    """
     try:
-        cid = _cid(params.get("customer_id", ""))
+        cid = _cid(customer_id)
         r = httpx.get(f"{BASE_URL}/v1/{cid}/metadata/customer/teams", headers=_headers(), timeout=30)
         r.raise_for_status()
-        return {"result": json.dumps(r.json(), indent=2)}
+        return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return {"error": str(e), "status": "failed"}
+        return json.dumps({"error": str(e), "status": "failed"})
 
 
-@mcp_tool(
-    name="get_profile_analytics",
-    description="Get analytics metrics aggregated by social profile.",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "profile_ids": {"type": "string", "description": "Comma-separated Sprout profile IDs."},
-            "start_time": {"type": "string", "description": "Start of period (ISO 8601)."},
-            "end_time": {"type": "string", "description": "End of period (ISO 8601)."},
-            "metrics": {"type": "string", "default": "impressions,engagements,net_follower_growth", "description": "Comma-separated metric names."},
-            "timezone": {"type": "string", "default": "UTC", "description": "Timezone for the report."},
-            "customer_id": {"type": "string", "default": ""},
-        },
-        "required": ["profile_ids", "start_time", "end_time"],
-    },
-)
-def handle_get_profile_analytics(params):
+# ---------------------------------------------------------------------------
+# Tool 7: get_profile_analytics
+# ---------------------------------------------------------------------------
+@mcp.tool()
+def get_profile_analytics(
+    profile_ids: str,
+    start_time: str,
+    end_time: str,
+    metrics: str = "impressions,engagements,net_follower_growth",
+    timezone: str = "America/New_York",
+    customer_id: str = "",
+) -> str:
+    """Get analytics metrics aggregated by social profile.
+
+    Args:
+        profile_ids: Comma-separated Sprout profile IDs.
+        start_time: Start of period (ISO 8601, e.g. 2026-03-10).
+        end_time: End of period (ISO 8601, e.g. 2026-03-17).
+        metrics: Comma-separated metric names (impressions, engagements, net_follower_growth, engagement_rate, video_views, reactions, comments, shares).
+        timezone: Timezone for the report.
+        customer_id: Sprout customer ID. Defaults to SPROUT_CUSTOMER_ID env var.
+    """
     try:
-        cid = _cid(params.get("customer_id", ""))
-        ids = ",".join(_split(params["profile_ids"]))
-        start_date = _date(params["start_time"])
-        end_date = _date(params["end_time"])
+        cid = _cid(customer_id)
+        ids = ",".join(_split(profile_ids))
+        start_date = _date(start_time)
+        end_date = _date(end_time)
         body = {
             "filters": [
                 f"customer_profile_id.eq({ids})",
                 f"reporting_period.in({start_date}...{end_date})",
             ],
-            "metrics": _split(params.get("metrics", "impressions,engagements,net_follower_growth")),
-            "timezone": params.get("timezone", "UTC"),
+            "metrics": _split(metrics),
+            "timezone": timezone,
         }
         r = httpx.post(f"{BASE_URL}/v1/{cid}/analytics/profiles", headers=_headers(), json=body, timeout=30)
         r.raise_for_status()
-        return {"result": json.dumps(r.json(), indent=2)}
+        return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return {"error": str(e), "status": "failed"}
+        return json.dumps({"error": str(e), "status": "failed"})
 
 
-@mcp_tool(
-    name="get_post_analytics",
-    description="Get analytics metrics for individual published posts. Post-level metrics require the 'lifetime.' prefix.",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "profile_ids": {"type": "string", "description": "Comma-separated Sprout profile IDs."},
-            "start_time": {"type": "string", "description": "Start of period (ISO 8601)."},
-            "end_time": {"type": "string", "description": "End of period (ISO 8601)."},
-            "metrics": {"type": "string", "default": "lifetime.impressions,lifetime.reactions,lifetime.engagements,lifetime.clicks"},
-            "limit": {"type": "number", "default": 50},
-            "customer_id": {"type": "string", "default": ""},
-        },
-        "required": ["profile_ids", "start_time", "end_time"],
-    },
-)
-def handle_get_post_analytics(params):
+# ---------------------------------------------------------------------------
+# Tool 8: get_post_analytics
+# ---------------------------------------------------------------------------
+@mcp.tool()
+def get_post_analytics(
+    profile_ids: str,
+    start_time: str,
+    end_time: str,
+    metrics: str = "lifetime.impressions,lifetime.reactions,lifetime.engagements,lifetime.clicks",
+    limit: int = 50,
+    customer_id: str = "",
+) -> str:
+    """Get analytics metrics for individual published posts.
+
+    Args:
+        profile_ids: Comma-separated Sprout profile IDs.
+        start_time: Start of period (ISO 8601).
+        end_time: End of period (ISO 8601).
+        metrics: Comma-separated metric names. Post-level metrics require 'lifetime.' prefix.
+        limit: Maximum number of posts to return.
+        customer_id: Sprout customer ID. Defaults to SPROUT_CUSTOMER_ID env var.
+    """
     try:
-        cid = _cid(params.get("customer_id", ""))
-        ids = ",".join(_split(params["profile_ids"]))
+        cid = _cid(customer_id)
+        ids = ",".join(_split(profile_ids))
         body = {
             "filters": [
                 f"customer_profile_id.eq({ids})",
-                f"created_time.in({params['start_time']}..{params['end_time']})",
+                f"created_time.in({start_time}..{end_time})",
             ],
             "fields": ["created_time", "text", "perma_link"],
-            "metrics": _split(params.get("metrics", "lifetime.impressions,lifetime.reactions,lifetime.engagements,lifetime.clicks")),
-            "limit": params.get("limit", 50),
+            "metrics": _split(metrics),
+            "limit": limit,
             "sort": ["created_time:desc"],
         }
         r = httpx.post(f"{BASE_URL}/v1/{cid}/analytics/posts", headers=_headers(), json=body, timeout=30)
         r.raise_for_status()
-        return {"result": json.dumps(r.json(), indent=2)}
+        return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return {"error": str(e), "status": "failed"}
+        return json.dumps({"error": str(e), "status": "failed"})
 
 
-@mcp_tool(
-    name="list_listening_topics",
-    description="List all Listening topics configured for a customer.",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "customer_id": {"type": "string", "default": ""},
-        },
-    },
-)
-def handle_list_listening_topics(params):
+# ---------------------------------------------------------------------------
+# Tool 9: list_listening_topics
+# ---------------------------------------------------------------------------
+@mcp.tool()
+def list_listening_topics(customer_id: str = "") -> str:
+    """List all Listening topics configured for a customer.
+
+    Args:
+        customer_id: Sprout customer ID. Defaults to SPROUT_CUSTOMER_ID env var.
+    """
     try:
-        cid = _cid(params.get("customer_id", ""))
+        cid = _cid(customer_id)
         r = httpx.get(f"{BASE_URL}/v1/{cid}/listening/topics", headers=_headers(), timeout=30)
         r.raise_for_status()
-        return {"result": json.dumps(r.json(), indent=2)}
+        return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return {"error": str(e), "status": "failed"}
+        return json.dumps({"error": str(e), "status": "failed"})
 
 
-@mcp_tool(
-    name="get_listening_messages",
-    description="Fetch messages from a Sprout Social Listening topic.",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "topic_id": {"type": "string", "description": "The listening topic ID (UUID)."},
-            "start_time": {"type": "string", "description": "Start datetime (ISO 8601)."},
-            "end_time": {"type": "string", "description": "End datetime (ISO 8601)."},
-            "networks": {"type": "string", "default": "", "description": "Comma-separated networks to filter by."},
-            "limit": {"type": "number", "default": 100},
-            "cursor": {"type": "string", "default": ""},
-            "customer_id": {"type": "string", "default": ""},
-        },
-        "required": ["topic_id", "start_time", "end_time"],
-    },
-)
-def handle_get_listening_messages(params):
+# ---------------------------------------------------------------------------
+# Tool 10: get_listening_messages
+# ---------------------------------------------------------------------------
+@mcp.tool()
+def get_listening_messages(
+    topic_id: str,
+    start_time: str,
+    end_time: str,
+    networks: str = "",
+    limit: int = 100,
+    cursor: str = "",
+    customer_id: str = "",
+) -> str:
+    """Fetch messages from a Sprout Social Listening topic.
+
+    Args:
+        topic_id: The listening topic ID (UUID).
+        start_time: Start datetime (ISO 8601).
+        end_time: End datetime (ISO 8601).
+        networks: Comma-separated networks to filter by.
+        limit: Maximum messages to return.
+        cursor: Pagination cursor from previous response.
+        customer_id: Sprout customer ID. Defaults to SPROUT_CUSTOMER_ID env var.
+    """
     try:
-        cid = _cid(params.get("customer_id", ""))
-        filters = [f"created_time.in({params['start_time']}..{params['end_time']})"]
-        networks = params.get("networks", "")
+        cid = _cid(customer_id)
+        filters = [f"created_time.in({start_time}..{end_time})"]
         if networks:
             for network in _split(networks):
                 filters.append(f"network.eq({network.upper()})")
         body = {
             "filters": filters,
             "fields": ["created_time", "text", "network", "perma_link", "language"],
-            "limit": params.get("limit", 100),
+            "limit": limit,
             "sort": ["created_time:desc"],
         }
-        cursor = params.get("cursor", "")
         if cursor:
             body["cursor"] = cursor
-        r = httpx.post(f"{BASE_URL}/v1/{cid}/listening/topics/{params['topic_id']}/messages", headers=_headers(), json=body, timeout=30)
+        r = httpx.post(
+            f"{BASE_URL}/v1/{cid}/listening/topics/{topic_id}/messages",
+            headers=_headers(), json=body, timeout=30,
+        )
         r.raise_for_status()
-        return {"result": json.dumps(r.json(), indent=2)}
+        return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return {"error": str(e), "status": "failed"}
+        return json.dumps({"error": str(e), "status": "failed"})
 
 
-@mcp_tool(
-    name="get_messages",
-    description="Retrieve inbound inbox messages (Smart Inbox) with optional filtering. Returns INBOUND messages only.",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "profile_ids": {"type": "string", "description": "Comma-separated Sprout profile IDs."},
-            "start_time": {"type": "string", "description": "Start datetime (ISO 8601)."},
-            "end_time": {"type": "string", "description": "End datetime (ISO 8601)."},
-            "tag_ids": {"type": "string", "default": ""},
-            "limit": {"type": "number", "default": 50},
-            "page_cursor": {"type": "string", "default": ""},
-            "customer_id": {"type": "string", "default": ""},
-        },
-        "required": ["profile_ids", "start_time", "end_time"],
-    },
-)
-def handle_get_messages(params):
+# ---------------------------------------------------------------------------
+# Tool 11: get_messages
+# ---------------------------------------------------------------------------
+@mcp.tool()
+def get_messages(
+    profile_ids: str,
+    start_time: str,
+    end_time: str,
+    tag_ids: str = "",
+    limit: int = 50,
+    page_cursor: str = "",
+    customer_id: str = "",
+) -> str:
+    """Retrieve inbound inbox messages (Smart Inbox) with optional filtering.
+
+    Args:
+        profile_ids: Comma-separated Sprout profile IDs.
+        start_time: Start datetime (ISO 8601).
+        end_time: End datetime (ISO 8601).
+        tag_ids: Comma-separated tag IDs to filter by.
+        limit: Maximum messages to return.
+        page_cursor: Pagination cursor from previous response.
+        customer_id: Sprout customer ID. Defaults to SPROUT_CUSTOMER_ID env var.
+    """
     try:
-        cid = _cid(params.get("customer_id", ""))
-        ids = ",".join(_split(params["profile_ids"]))
+        cid = _cid(customer_id)
+        ids = ",".join(_split(profile_ids))
         filters = [
             f"customer_profile_id.eq({ids})",
-            f"created_time.in({params['start_time']}..{params['end_time']})",
+            f"created_time.in({start_time}..{end_time})",
         ]
-        tag_ids = params.get("tag_ids", "")
         if tag_ids:
             tag_list = ",".join(_split(tag_ids))
             filters.append(f"tag_id.eq({tag_list})")
-        body = {"filters": filters, "limit": params.get("limit", 50)}
-        page_cursor = params.get("page_cursor", "")
+        body = {"filters": filters, "limit": limit}
         if page_cursor:
             body["page_cursor"] = page_cursor
         r = httpx.post(f"{BASE_URL}/v1/{cid}/messages", headers=_headers(), json=body, timeout=30)
         r.raise_for_status()
-        return {"result": json.dumps(r.json(), indent=2)}
+        return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return {"error": str(e), "status": "failed"}
+        return json.dumps({"error": str(e), "status": "failed"})
 
 
-@mcp_tool(
-    name="list_publishing_posts",
-    description="List published, scheduled, or draft posts in Sprout Social.",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "profile_ids": {"type": "string", "description": "Comma-separated Sprout profile IDs."},
-            "start_time": {"type": "string", "description": "Start datetime (ISO 8601)."},
-            "end_time": {"type": "string", "description": "End datetime (ISO 8601)."},
-            "status": {"type": "string", "default": "", "description": "Filter by post status: PUBLISHED, SCHEDULED, DRAFT."},
-            "limit": {"type": "number", "default": 50},
-            "customer_id": {"type": "string", "default": ""},
-        },
-        "required": ["profile_ids", "start_time", "end_time"],
-    },
-)
-def handle_list_publishing_posts(params):
+# ---------------------------------------------------------------------------
+# Tool 12: list_publishing_posts
+# ---------------------------------------------------------------------------
+@mcp.tool()
+def list_publishing_posts(
+    profile_ids: str,
+    start_time: str,
+    end_time: str,
+    status: str = "",
+    limit: int = 50,
+    customer_id: str = "",
+) -> str:
+    """List published, scheduled, or draft posts in Sprout Social.
+
+    Args:
+        profile_ids: Comma-separated Sprout profile IDs.
+        start_time: Start datetime (ISO 8601).
+        end_time: End datetime (ISO 8601).
+        status: Filter by post status: PUBLISHED, SCHEDULED, DRAFT. Leave empty for all.
+        limit: Maximum posts to return.
+        customer_id: Sprout customer ID. Defaults to SPROUT_CUSTOMER_ID env var.
+    """
     try:
-        cid = _cid(params.get("customer_id", ""))
-        ids = ",".join(_split(params["profile_ids"]))
+        cid = _cid(customer_id)
+        ids = ",".join(_split(profile_ids))
         filters = [
             f"customer_profile_id.eq({ids})",
-            f"created_time.in({params['start_time']}..{params['end_time']})",
+            f"created_time.in({start_time}..{end_time})",
         ]
-        status = params.get("status", "")
         if status:
             filters.append(f"status.eq({status.upper()})")
         body = {
             "filters": filters,
-            "limit": params.get("limit", 50),
+            "limit": limit,
             "sort": ["created_time:desc"],
         }
         r = httpx.post(f"{BASE_URL}/v1/{cid}/publishing/posts", headers=_headers(), json=body, timeout=30)
         r.raise_for_status()
-        return {"result": json.dumps(r.json(), indent=2)}
+        return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return {"error": str(e), "status": "failed"}
+        return json.dumps({"error": str(e), "status": "failed"})
 
 
-@mcp_tool(
-    name="create_post",
-    description="Create a draft or scheduled post in Sprout Social.",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "profile_ids": {"type": "string", "description": "Comma-separated Sprout profile IDs to publish to."},
-            "text": {"type": "string", "description": "Post content/body text."},
-            "scheduled_send_time": {"type": "string", "default": "", "description": "When to publish (ISO 8601). Leave empty for draft."},
-            "customer_id": {"type": "string", "default": ""},
-        },
-        "required": ["profile_ids", "text"],
-    },
-)
-def handle_create_post(params):
+# ---------------------------------------------------------------------------
+# Tool 13: create_post
+# ---------------------------------------------------------------------------
+@mcp.tool()
+def create_post(
+    profile_ids: str,
+    text: str,
+    scheduled_send_time: str = "",
+    customer_id: str = "",
+) -> str:
+    """Create a draft or scheduled post in Sprout Social.
+
+    Args:
+        profile_ids: Comma-separated Sprout profile IDs to publish to.
+        text: Post content/body text.
+        scheduled_send_time: When to publish (ISO 8601). Leave empty for draft.
+        customer_id: Sprout customer ID. Defaults to SPROUT_CUSTOMER_ID env var.
+    """
     try:
-        cid = _cid(params.get("customer_id", ""))
+        cid = _cid(customer_id)
         body = {
             "post_type": "OUTBOUND",
-            "profile_ids": _split(params["profile_ids"]),
-            "fields": {"text": params["text"]},
+            "profile_ids": _split(profile_ids),
+            "fields": {"text": text},
         }
-        sst = params.get("scheduled_send_time", "")
-        if sst:
-            body["scheduled_send_time"] = sst
+        if scheduled_send_time:
+            body["scheduled_send_time"] = scheduled_send_time
         r = httpx.post(f"{BASE_URL}/v1/{cid}/publishing/posts", headers=_headers(), json=body, timeout=30)
         r.raise_for_status()
-        return {"result": json.dumps(r.json(), indent=2)}
+        return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return {"error": str(e), "status": "failed"}
+        return json.dumps({"error": str(e), "status": "failed"})
 
 
-@mcp_tool(
-    name="get_publishing_post",
-    description="Retrieve a specific publishing post by ID.",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "post_id": {"type": "string", "description": "The publishing post ID."},
-            "customer_id": {"type": "string", "default": ""},
-        },
-        "required": ["post_id"],
-    },
-)
-def handle_get_publishing_post(params):
+# ---------------------------------------------------------------------------
+# Tool 14: get_publishing_post
+# ---------------------------------------------------------------------------
+@mcp.tool()
+def get_publishing_post(
+    post_id: str,
+    customer_id: str = "",
+) -> str:
+    """Retrieve a specific publishing post by ID.
+
+    Args:
+        post_id: The publishing post ID.
+        customer_id: Sprout customer ID. Defaults to SPROUT_CUSTOMER_ID env var.
+    """
     try:
-        cid = _cid(params.get("customer_id", ""))
-        r = httpx.get(f"{BASE_URL}/v1/{cid}/publishing/posts/{params['post_id']}", headers=_headers(), timeout=30)
+        cid = _cid(customer_id)
+        r = httpx.get(f"{BASE_URL}/v1/{cid}/publishing/posts/{post_id}", headers=_headers(), timeout=30)
         r.raise_for_status()
-        return {"result": json.dumps(r.json(), indent=2)}
+        return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return {"error": str(e), "status": "failed"}
+        return json.dumps({"error": str(e), "status": "failed"})
 
 
 # ---------------------------------------------------------------------------
-# MCP JSON-RPC 2.0 Handler
+# ASGI app for uvicorn (Streamable HTTP transport)
 # ---------------------------------------------------------------------------
-
-def handle_mcp_request(data):
-    method = data.get("method", "")
-    params = data.get("params", {})
-    request_id = data.get("id")
-
-    if method == "initialize":
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "sprout-social-mcp", "version": "1.0.0"},
-            },
-        }
-
-    if method == "tools/list":
-        tools = []
-        for name, tool_def in MCP_TOOLS.items():
-            tools.append({
-                "name": tool_def["name"],
-                "description": tool_def["description"],
-                "inputSchema": tool_def["inputSchema"],
-            })
-        return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": tools}}
-
-    if method == "tools/call":
-        tool_name = params.get("name", "")
-        tool_args = params.get("arguments", {})
-        if tool_name not in MCP_TOOLS:
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"},
-            }
-        try:
-            handler = MCP_TOOLS[tool_name]["handler"]
-            result = handler(tool_args)
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {
-                    "content": [{"type": "text", "text": json.dumps(result, indent=2, default=str)}],
-                    "isError": "error" in result and result.get("status") == "failed",
-                },
-            }
-        except Exception as e:
-            logger.error(f"Tool {tool_name} error: {e}")
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {
-                    "content": [{"type": "text", "text": json.dumps({"error": str(e), "status": "failed"})}],
-                    "isError": True,
-                },
-            }
-
-    if method == "ping":
-        return {"jsonrpc": "2.0", "id": request_id, "result": {}}
-
-    return {
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "error": {"code": -32601, "message": f"Method not found: {method}"},
-    }
-
-
-@app.route("/mcp", methods=["POST"])
-def mcp_endpoint():
-    if not verify_auth():
-        return jsonify({"jsonrpc": "2.0", "id": None, "error": {"code": -32000, "message": "Unauthorized"}}), 401
-
-    content_type = request.content_type or ""
-    if "json" not in content_type:
-        return jsonify({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Content-Type must be application/json"}}), 400
-
-    try:
-        data = request.get_json()
-    except Exception:
-        return jsonify({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}), 400
-
-    if not data:
-        return jsonify({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid request"}}), 400
-
-    if isinstance(data, list):
-        responses = [handle_mcp_request(req) for req in data]
-        return jsonify(responses)
-
-    return jsonify(handle_mcp_request(data))
-
-
-@app.route("/mcp/health", methods=["GET"])
-def health():
-    return jsonify({
-        "status": "ok",
-        "server": "sprout-social-mcp",
-        "version": "1.0.0",
-        "tools": list(MCP_TOOLS.keys()),
-        "tool_count": len(MCP_TOOLS),
-    })
-
-
-@app.route("/", methods=["GET"])
-def root():
-    return jsonify({"status": "ok", "service": "sprout-social-mcp"})
-
+app = mcp.streamable_http_app()
 
 if __name__ == "__main__":
+    import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port)
+    logger.info(f"Starting Sprout Social MCP server on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
